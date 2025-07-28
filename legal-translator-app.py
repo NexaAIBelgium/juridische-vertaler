@@ -526,11 +526,11 @@ def main():
                     with st.expander("🔍 View individual chunks"):
                         for i, (chunk, translation) in enumerate(zip(chunks, translations)):
                             st.write(f"**Chunk {i + 1}** - {chunk.section_header or 'No header'}")
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.text_area(f"Original {i+1}", chunk.text[:500] + "...", height=200, key=f"orig_{i}")
-                            with col2:
-                                st.text_area(f"Translation {i+1}", translation[:500] + "...", height=200, key=f"trans_{i}")
+                            st.write("**Original:**")
+                            st.text_area(f"Original chunk {i+1}", chunk.text[:500] + "...", height=150, key=f"orig_{i}")
+                            st.write("**Translation:**")
+                            st.text_area(f"Translated chunk {i+1}", translation[:500] + "...", height=150, key=f"trans_{i}")
+                            st.divider()
                     
                     # Download button
                     st.download_button(
