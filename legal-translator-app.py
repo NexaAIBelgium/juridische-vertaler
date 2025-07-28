@@ -217,11 +217,27 @@ class LegalDocumentTranslator:
     
     def _create_paragraph_chunks(self, text: str, overlap_size: int) -> List[TranslationChunk]:
         """Fallback chunking by paragraphs - improved for legal documents"""
-        # Split by double newlines or numbered sections
-        sections = re.split(r'\n\n+|\n(?=\d+\.)', text)
+        # Don't split on numbered items that are part of lists
+        # Only split on double newlines or major section breaks
         
         chunks = []
         chunk_id = 0
+        
+        # If the text is small enough, return as single chunk
+        if len(text) <= self.max_chars_per_chunk:
+            chunks.append(TranslationChunk(
+                id=0,
+                text=text,
+                start_pos=0,
+                end_pos=len(text),
+                overlap_text=None
+            ))
+            return chunks
+        
+        # For larger texts, split more carefully
+        # Look for major section breaks (multiple newlines)
+        sections = re.split(r'\n{3,}', text)
+        
         current_chunk = []
         current_chars = 0
         current_start = 0
@@ -233,26 +249,52 @@ class LegalDocumentTranslator:
                 
             section_chars = len(section)
             
-            # If adding this section would exceed limit and we have content
-            if current_chars + section_chars > self.max_chars_per_chunk and current_chunk:
-                # Create chunk
-                chunk_text = '\n\n'.join(current_chunk)
-                chunks.append(TranslationChunk(
-                    id=chunk_id,
-                    text=chunk_text,
-                    start_pos=current_start,
-                    end_pos=current_start + len(chunk_text),
-                    overlap_text=chunks[-1].text[-overlap_size:] if chunks else None
-                ))
-                chunk_id += 1
-                
-                # Start new chunk
-                current_chunk = [section]
-                current_chars = section_chars
-                current_start += len(chunk_text) + 2
+            # If this single section is too large, we need to split it further
+            if section_chars > self.max_chars_per_chunk:
+                # Split by paragraphs within the section
+                paragraphs = section.split('\n\n')
+                for para in paragraphs:
+                    para_chars = len(para)
+                    if current_chars + para_chars > self.max_chars_per_chunk and current_chunk:
+                        # Save current chunk
+                        chunk_text = '\n\n'.join(current_chunk)
+                        chunks.append(TranslationChunk(
+                            id=chunk_id,
+                            text=chunk_text,
+                            start_pos=current_start,
+                            end_pos=current_start + len(chunk_text),
+                            overlap_text=chunks[-1].text[-overlap_size:] if chunks else None
+                        ))
+                        chunk_id += 1
+                        current_chunk = [para]
+                        current_chars = para_chars
+                        current_start += len(chunk_text) + 2
+                    else:
+                        current_chunk.append(para)
+                        current_chars += para_chars + 2
             else:
-                current_chunk.append(section)
-                current_chars += section_chars + 2  # +2 for newlines
+                # Section fits, add to current chunk or start new one
+                if current_chars + section_chars > self.max_chars_per_chunk and current_chunk:
+                    # Save current chunk
+                    chunk_text = '\n\n'.join(current_chunk)
+                    chunks.append(TranslationChunk(
+                        id=chunk_id,
+                        text=chunk_text,
+                        start_pos=current_start,
+                        end_pos=current_start + len(chunk_text),
+                        overlap_text=chunks[-1].text[-overlap_size:] if chunks else None
+                    ))
+                    chunk_id += 1
+                    current_chunk = [section]
+                    current_chars = section_chars
+                    current_start += len(chunk_text) + 2
+                else:
+                    if current_chunk:
+                        current_chunk.append(section)
+                        current_chars += section_chars + 4  # Account for separator
+                    else:
+                        current_chunk = [section]
+                        current_chars = section_chars
         
         # Add final chunk
         if current_chunk:
@@ -480,6 +522,15 @@ def main():
                     # Create chunks
                     chunks = translator.create_chunks(text, chunk_overlap)
                     st.info(f"✂️ Created {len(chunks)} chunks")
+                    
+                    # Debug: Show chunk sizes
+                    with st.expander("📊 Chunk Information"):
+                        for i, chunk in enumerate(chunks):
+                            st.write(f"**Chunk {i+1}**: {len(chunk.text)} characters")
+                            st.write(f"Preview: {chunk.text[:100]}...")
+                            if chunk.section_header:
+                                st.write(f"Header: {chunk.section_header}")
+                            st.divider()
                     
                     # Progress bar
                     progress_bar = st.progress(0)
