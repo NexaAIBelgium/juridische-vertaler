@@ -216,18 +216,26 @@ class LegalDocumentTranslator:
         return chunks
     
     def _create_paragraph_chunks(self, text: str, overlap_size: int) -> List[TranslationChunk]:
-        """Fallback chunking by paragraphs"""
-        paragraphs = text.split('\n\n')
+        """Fallback chunking by paragraphs - improved for legal documents"""
+        # Split by double newlines or numbered sections
+        sections = re.split(r'\n\n+|\n(?=\d+\.)', text)
+        
         chunks = []
         chunk_id = 0
         current_chunk = []
         current_chars = 0
         current_start = 0
         
-        for para in paragraphs:
-            para_chars = len(para)
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+                
+            section_chars = len(section)
             
-            if current_chars + para_chars > self.max_chars_per_chunk and current_chunk:
+            # If adding this section would exceed limit and we have content
+            if current_chars + section_chars > self.max_chars_per_chunk and current_chunk:
+                # Create chunk
                 chunk_text = '\n\n'.join(current_chunk)
                 chunks.append(TranslationChunk(
                     id=chunk_id,
@@ -238,13 +246,15 @@ class LegalDocumentTranslator:
                 ))
                 chunk_id += 1
                 
-                current_chunk = [para]
-                current_chars = para_chars
+                # Start new chunk
+                current_chunk = [section]
+                current_chars = section_chars
                 current_start += len(chunk_text) + 2
             else:
-                current_chunk.append(para)
-                current_chars += para_chars
+                current_chunk.append(section)
+                current_chars += section_chars + 2  # +2 for newlines
         
+        # Add final chunk
         if current_chunk:
             chunk_text = '\n\n'.join(current_chunk)
             chunks.append(TranslationChunk(
@@ -437,7 +447,14 @@ def main():
             with st.expander("Preview Original Text"):
                 st.text_area("First 1000 characters", text[:1000], height=200)
             
-            st.info(f"Document length: {len(text)} characters")
+            # Show document statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Document Length", f"{len(text):,} chars")
+            with col2:
+                st.metric("Estimated Pages", f"~{len(text) // 3000}")
+            with col3:
+                st.metric("Line Count", f"{text.count(chr(10)):,}")
     
     with col2:
         st.header("🔄 Translation")
@@ -470,12 +487,18 @@ def main():
                     
                     # Translate chunks
                     translations = []
+                    failed_chunks = []
+                    
                     for i, chunk in enumerate(chunks):
                         status_text.text(f"Translating chunk {i + 1}/{len(chunks)}...")
                         progress_bar.progress((i + 1) / len(chunks))
                         
                         translation = translator.translate_chunk(chunk, metadata)
                         translations.append(translation)
+                        
+                        # Check if translation failed
+                        if "[TRANSLATION FAILED" in translation or "[ERROR:" in translation:
+                            failed_chunks.append(i + 1)
                         
                         # Small delay to avoid rate limits
                         time.sleep(0.5)
@@ -488,7 +511,26 @@ def main():
                     
                     # Display translation
                     st.subheader("📝 Translated Document")
-                    st.text_area("Translation", final_translation, height=400)
+                    
+                    # Show chunk information
+                    st.info(f"📊 Document processed in {len(chunks)} chunks")
+                    
+                    # Display full translation
+                    st.text_area("Full Translation", final_translation, height=600)
+                    
+                    # If there were issues, show them
+                    if failed_chunks:
+                        st.warning(f"⚠️ Chunks {failed_chunks} could not be translated and were preserved in original form.")
+                    
+                    # Show individual chunks for debugging
+                    with st.expander("🔍 View individual chunks"):
+                        for i, (chunk, translation) in enumerate(zip(chunks, translations)):
+                            st.write(f"**Chunk {i + 1}** - {chunk.section_header or 'No header'}")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.text_area(f"Original {i+1}", chunk.text[:500] + "...", height=200, key=f"orig_{i}")
+                            with col2:
+                                st.text_area(f"Translation {i+1}", translation[:500] + "...", height=200, key=f"trans_{i}")
                     
                     # Download button
                     st.download_button(
@@ -497,10 +539,6 @@ def main():
                         file_name=f"{uploaded_file.name.split('.')[0]}_translated_{target_lang.lower()}.txt",
                         mime="text/plain"
                     )
-                    
-                    # Check for errors
-                    if "[TRANSLATION FAILED" in final_translation or "[ERROR:" in final_translation:
-                        st.warning("⚠️ Some sections could not be translated and were preserved in original form.")
                     
                 except Exception as e:
                     st.error(f"Translation failed: {str(e)}")
