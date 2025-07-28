@@ -176,42 +176,112 @@ class LegalDocumentTranslator:
         
         return sorted(headers)
     
-    def create_chunks(self, text: str, overlap_size: int = 200) -> List[TranslationChunk]:
-        """Create intelligent chunks based on document structure"""
-        headers = self.detect_document_structure(text)
+    def create_chunks(self, text: str, overlap_size: int = 200, optimal_chunk_size: int = 10000) -> List[TranslationChunk]:
+        """Create intelligent chunks based on document structure and size"""
+        
+        # Calculate optimal number of chunks
+        total_length = len(text)
+        optimal_chunk_size = 10000  # Target size for better translation quality
+        num_chunks = max(1, (total_length + optimal_chunk_size - 1) // optimal_chunk_size)
+        target_chunk_size = total_length // num_chunks
+        
+        print(f"Document length: {total_length} chars")
+        print(f"Target chunks: {num_chunks}, ~{target_chunk_size} chars each")
+        
+        # If document is small, return as single chunk
+        if num_chunks == 1:
+            return [TranslationChunk(
+                id=0,
+                text=text,
+                start_pos=0,
+                end_pos=len(text),
+                overlap_text=None,
+                section_header="Complete Document"
+            )]
+        
+        # Find all paragraph boundaries
+        paragraphs = []
+        current_pos = 0
+        
+        # Split by double newlines to find paragraphs
+        parts = text.split('\n\n')
+        for part in parts:
+            if part.strip():
+                paragraphs.append({
+                    'start': current_pos,
+                    'end': current_pos + len(part),
+                    'text': part,
+                    'length': len(part)
+                })
+            current_pos += len(part) + 2  # +2 for \n\n
+        
+        # Now distribute paragraphs into chunks
         chunks = []
         chunk_id = 0
+        current_chunk_paragraphs = []
+        current_chunk_size = 0
         
-        if not headers:
-            return self._create_paragraph_chunks(text, overlap_size)
-        
-        headers.append((len(text), "END"))
-        
-        for i in range(len(headers) - 1):
-            start_pos = headers[i][0]
-            end_pos = headers[i + 1][0]
-            section_text = text[start_pos:end_pos].strip()
-            
-            if len(section_text) > self.max_chars_per_chunk:
-                sub_chunks = self._split_large_section(
-                    section_text, start_pos, headers[i][1], overlap_size
-                )
-                chunks.extend(sub_chunks)
-            else:
+        for i, para in enumerate(paragraphs):
+            # Check if adding this paragraph would make chunk too large
+            if current_chunk_size + para['length'] > target_chunk_size * 1.3 and current_chunk_paragraphs:
+                # Save current chunk
+                chunk_text = '\n\n'.join([p['text'] for p in current_chunk_paragraphs])
+                chunk_start = current_chunk_paragraphs[0]['start']
+                chunk_end = current_chunk_paragraphs[-1]['end']
+                
                 overlap_text = None
                 if chunks and overlap_size > 0:
-                    prev_text = chunks[-1].text
-                    overlap_text = prev_text[-overlap_size:] if len(prev_text) > overlap_size else prev_text
+                    overlap_text = chunks[-1].text[-overlap_size:]
                 
                 chunks.append(TranslationChunk(
                     id=chunk_id,
-                    text=section_text,
-                    start_pos=start_pos,
-                    end_pos=end_pos,
-                    section_header=headers[i][1],
+                    text=chunk_text,
+                    start_pos=chunk_start,
+                    end_pos=chunk_end,
+                    section_header=f"Part {chunk_id + 1} of {num_chunks}",
                     overlap_text=overlap_text
                 ))
                 chunk_id += 1
+                
+                # Start new chunk
+                current_chunk_paragraphs = [para]
+                current_chunk_size = para['length']
+            else:
+                # Add to current chunk
+                current_chunk_paragraphs.append(para)
+                current_chunk_size += para['length'] + 2
+        
+        # Don't forget the last chunk
+        if current_chunk_paragraphs:
+            chunk_text = '\n\n'.join([p['text'] for p in current_chunk_paragraphs])
+            chunk_start = current_chunk_paragraphs[0]['start']
+            chunk_end = current_chunk_paragraphs[-1]['end']
+            
+            overlap_text = None
+            if chunks and overlap_size > 0:
+                overlap_text = chunks[-1].text[-overlap_size:]
+            
+            chunks.append(TranslationChunk(
+                id=chunk_id,
+                text=chunk_text,
+                start_pos=chunk_start,
+                end_pos=chunk_end,
+                section_header=f"Part {chunk_id + 1} of {num_chunks}",
+                overlap_text=overlap_text
+            ))
+        
+        # Rebalance if chunks are very uneven
+        chunk_sizes = [len(chunk.text) for chunk in chunks]
+        min_size = min(chunk_sizes)
+        max_size = max(chunk_sizes)
+        
+        if max_size > min_size * 2:
+            print(f"Chunks are unbalanced: {min_size} to {max_size} chars")
+            # Could implement rebalancing logic here if needed
+        
+        print(f"Created {len(chunks)} chunks:")
+        for i, chunk in enumerate(chunks):
+            print(f"  Chunk {i+1}: {len(chunk.text)} chars")
         
         return chunks
     
@@ -456,6 +526,14 @@ def main():
         with st.expander("Advanced Options"):
             use_ocr = st.checkbox("Force OCR (for scanned PDFs)", value=False)
             chunk_overlap = st.slider("Chunk Overlap (characters)", 100, 500, 200)
+            optimal_chunk_size = st.slider(
+                "Target Chunk Size (characters)", 
+                min_value=5000, 
+                max_value=15000, 
+                value=10000,
+                step=1000,
+                help="Smaller chunks = more pieces but better translation quality"
+            )
     
     # Main area
     col1, col2 = st.columns(2)
@@ -520,16 +598,23 @@ def main():
                     st.info(f"📋 Found {len(defined_terms)} defined terms")
                     
                     # Create chunks
-                    chunks = translator.create_chunks(text, chunk_overlap)
+                    chunks = translator.create_chunks(text, chunk_overlap, optimal_chunk_size)
                     st.info(f"✂️ Created {len(chunks)} chunks")
                     
                     # Debug: Show chunk sizes
                     with st.expander("📊 Chunk Information"):
+                        total_chars = sum(len(chunk.text) for chunk in chunks)
+                        st.write(f"**Total characters in chunks**: {total_chars:,}")
+                        st.write(f"**Original text length**: {len(text):,}")
+                        
+                        if total_chars < len(text) * 0.9:
+                            st.error(f"⚠️ WARNING: Only {total_chars/len(text)*100:.1f}% of text is in chunks!")
+                        
                         for i, chunk in enumerate(chunks):
-                            st.write(f"**Chunk {i+1}**: {len(chunk.text)} characters")
-                            st.write(f"Preview: {chunk.text[:100]}...")
-                            if chunk.section_header:
-                                st.write(f"Header: {chunk.section_header}")
+                            st.write(f"**Chunk {i+1}**: {len(chunk.text):,} characters")
+                            st.write(f"Header: {chunk.section_header}")
+                            st.code(f"First 200 chars: {chunk.text[:200]}...")
+                            st.code(f"Last 100 chars: ...{chunk.text[-100:]}")
                             st.divider()
                     
                     # Progress bar
