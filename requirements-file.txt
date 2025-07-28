@@ -1,0 +1,21 @@
+# Core dependencies
+streamlit>=1.29.0
+google-generativeai>=0.3.0
+python-dotenv>=1.0.0
+
+# PDF processing
+PyPDF2>=3.0.0
+PyMuPDF>=1.23.0
+pdf2image>=1.16.0
+
+# OCR support
+pytesseract>=0.3.10
+Pillow>=10.0.0
+
+# Data handling
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Optional but recommended
+chardet>=5.0.0  # For character encoding detection
+langdetect>=1.0.9  # For language detection
