@@ -1,0 +1,15 @@
+tesseract-ocr
+tesseract-ocr-eng
+tesseract-ocr-nld
+tesseract-ocr-fra
+tesseract-ocr-deu
+tesseract-ocr-spa
+poppler-utils
+libgl1-mesa-glx
+libglib2.0-0
+libsm6
+libxext6
+libxrender-dev
+libgomp1
+libgstreamer1.0-0
+libgstreamer-plugins-base1.0-0
