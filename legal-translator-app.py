@@ -57,7 +57,7 @@ class PDFProcessor:
     @staticmethod
     def extract_text_from_pdf(pdf_file) -> Tuple[str, bool]:
         """
-        Extract text from PDF, using OCR if necessary
+        Extract text from PDF, preserving layout and formatting
         Returns: (text, used_ocr)
         """
         text = ""
@@ -69,11 +69,15 @@ class PDFProcessor:
             
             for page_num in range(pdf_document.page_count):
                 page = pdf_document[page_num]
-                page_text = page.get_text()
+                # Use get_text with "text" option to preserve layout better
+                page_text = page.get_text("text", sort=True)
                 
                 # Check if page has actual text
                 if page_text.strip():
-                    text += page_text + "\n\n"
+                    text += page_text
+                    # Don't add extra newlines - preserve original spacing
+                    if page_num < pdf_document.page_count - 1:
+                        text += "\n"
                 else:
                     # Page seems to be image-based, use OCR
                     used_ocr = True
@@ -81,9 +85,15 @@ class PDFProcessor:
                     img_data = pix.tobytes("png")
                     image = Image.open(io.BytesIO(img_data))
                     
-                    # OCR with Tesseract
-                    page_text = pytesseract.image_to_string(image, lang='eng')
-                    text += page_text + "\n\n"
+                    # OCR with Tesseract - preserve layout
+                    page_text = pytesseract.image_to_string(
+                        image, 
+                        lang='eng',
+                        config='--psm 6'  # Preserve original layout
+                    )
+                    text += page_text
+                    if page_num < pdf_document.page_count - 1:
+                        text += "\n"
             
             pdf_document.close()
             
@@ -93,14 +103,17 @@ class PDFProcessor:
             try:
                 pdf_file.seek(0)
                 pdf_reader = PyPDF2.PdfReader(pdf_file)
-                for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n\n"
+                for i, page in enumerate(pdf_reader.pages):
+                    text += page.extract_text()
+                    if i < len(pdf_reader.pages) - 1:
+                        text += "\n"
             except:
                 # Last resort - full OCR
                 used_ocr = True
                 text = PDFProcessor.ocr_entire_pdf(pdf_file)
         
-        return text.strip(), used_ocr
+        # Don't strip or modify the text - preserve all formatting
+        return text, used_ocr
     
     @staticmethod
     def ocr_entire_pdf(pdf_file) -> str:
@@ -141,9 +154,13 @@ class LegalDocumentTranslator:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
         
-        # Token limits for Gemini
-        self.max_chars_per_chunk = 15000  # Conservative estimate
-        self.max_output_chars = 20000
+        # Token limits for Gemini with 70% safety margin
+        # 8192 output tokens * 0.7 = 5734 tokens
+        # 5734 tokens * 4 chars/token = 22,936 characters
+        self.safety_factor = 0.7
+        self.max_output_tokens = int(8192 * self.safety_factor)  # 5734 tokens
+        self.max_chars_per_chunk = int(self.max_output_tokens * 4)  # ~23,000 chars
+        self.absolute_max_chars = 30000  # Hard limit regardless of settings
     
     def estimate_tokens(self, text: str) -> int:
         """Estimate token count (rough approximation for Gemini)"""
@@ -199,21 +216,28 @@ class LegalDocumentTranslator:
                 section_header="Complete Document"
             )]
         
-        # Find all paragraph boundaries
+        # Find all paragraph boundaries (but preserve exact formatting)
         paragraphs = []
         current_pos = 0
         
-        # Split by double newlines to find paragraphs
-        parts = text.split('\n\n')
-        for part in parts:
-            if part.strip():
-                paragraphs.append({
-                    'start': current_pos,
-                    'end': current_pos + len(part),
-                    'text': part,
-                    'length': len(part)
-                })
-            current_pos += len(part) + 2  # +2 for \n\n
+        # Split by double newlines to find paragraphs, but keep the newlines
+        parts = re.split(r'(\n\n+)', text)
+        
+        for i in range(0, len(parts), 2):
+            if i < len(parts):
+                para_text = parts[i]
+                # Include the separator (newlines) if it exists
+                if i + 1 < len(parts):
+                    para_text += parts[i + 1]
+                
+                if para_text:  # Include empty lines too
+                    paragraphs.append({
+                        'start': current_pos,
+                        'end': current_pos + len(para_text),
+                        'text': para_text,
+                        'length': len(para_text)
+                    })
+                    current_pos += len(para_text)
         
         # Now distribute paragraphs into chunks
         chunks = []
@@ -224,8 +248,8 @@ class LegalDocumentTranslator:
         for i, para in enumerate(paragraphs):
             # Check if adding this paragraph would make chunk too large
             if current_chunk_size + para['length'] > target_chunk_size * 1.3 and current_chunk_paragraphs:
-                # Save current chunk
-                chunk_text = '\n\n'.join([p['text'] for p in current_chunk_paragraphs])
+                # Save current chunk (preserve exact formatting)
+                chunk_text = ''.join([p['text'] for p in current_chunk_paragraphs])
                 chunk_start = current_chunk_paragraphs[0]['start']
                 chunk_end = current_chunk_paragraphs[-1]['end']
                 
@@ -251,9 +275,9 @@ class LegalDocumentTranslator:
                 current_chunk_paragraphs.append(para)
                 current_chunk_size += para['length'] + 2
         
-        # Don't forget the last chunk
+        # Don't forget the last chunk (preserve exact formatting)
         if current_chunk_paragraphs:
-            chunk_text = '\n\n'.join([p['text'] for p in current_chunk_paragraphs])
+            chunk_text = ''.join([p['text'] for p in current_chunk_paragraphs])
             chunk_start = current_chunk_paragraphs[0]['start']
             chunk_end = current_chunk_paragraphs[-1]['end']
             
@@ -435,19 +459,23 @@ Perform a LITERAL, word-for-word translation from {metadata.source_lang} to {met
 
 CRITICAL TRANSLATION RULES:
 1. **LITERAL TRANSLATION**: Translate as literally as possible, word-for-word when feasible
-2. **PRESERVE EVERYTHING**: Keep the EXACT structure, formatting, punctuation, and line breaks
+2. **PRESERVE EXACT LAYOUT**: Keep ALL line breaks, spacing, indentation, and formatting EXACTLY as in the original
 3. **NO INTERPRETATION**: Do not interpret, paraphrase, or "improve" the text
-4. **MAINTAIN AWKWARDNESS**: If the original is awkward or repetitive, keep it that way
-5. **EXACT CORRESPONDENCE**: Each sentence in the original must have a corresponding sentence in the translation
+4. **MAINTAIN FORMATTING**: 
+   - If a line has 3 spaces before it, keep 3 spaces
+   - If there's a blank line, keep the blank line
+   - If text is indented, keep the same indentation
+   - Preserve ALL line breaks exactly where they appear
+5. **EXACT CORRESPONDENCE**: Each line in the original must have a corresponding line in the translation
 
 CONTEXT:
 - Document Type: {metadata.document_type}
 - Section: {chunk.section_header or 'General content'}
 
-TEXT TO TRANSLATE:
+TEXT TO TRANSLATE (preserve exact formatting):
 {chunk.text}
 
-LITERAL TRANSLATION (nothing else):"""
+LITERAL TRANSLATION (maintain exact same layout):"""
         
         return prompt
     
@@ -526,14 +554,44 @@ def main():
         with st.expander("Advanced Options"):
             use_ocr = st.checkbox("Force OCR (for scanned PDFs)", value=False)
             chunk_overlap = st.slider("Chunk Overlap (characters)", 100, 500, 200)
+            
+            # Safety margin setting
+            safety_margin = st.slider(
+                "Output Safety Margin", 
+                min_value=50, 
+                max_value=90, 
+                value=70,
+                step=5,
+                help="Percentage of output limit to use (70% = conservative, 90% = aggressive)"
+            )
+            
+            # Calculate safe limits based on safety margin
+            safe_output_tokens = int(8192 * (safety_margin / 100))
+            safe_output_chars = safe_output_tokens * 4
+            
+            # Determine safe chunk size based on language pair
+            if any(lang in [source_lang, target_lang] for lang in ["Chinese (Simplified)", "Japanese", "Korean", "Arabic"]):
+                default_chunk = min(10000, safe_output_chars)
+                max_chunk = min(15000, safe_output_chars)
+                help_text = f"Max {safe_output_chars:,} chars with {safety_margin}% safety margin (Asian/Arabic languages)"
+            else:
+                default_chunk = min(15000, safe_output_chars)
+                max_chunk = min(25000, safe_output_chars)
+                help_text = f"Max {safe_output_chars:,} chars with {safety_margin}% safety margin"
+            
             optimal_chunk_size = st.slider(
                 "Target Chunk Size (characters)", 
                 min_value=5000, 
-                max_value=15000, 
-                value=10000,
+                max_value=max_chunk, 
+                value=default_chunk,
                 step=1000,
-                help="Smaller chunks = more pieces but better translation quality"
+                help=help_text
             )
+            
+            # Show token estimate with safety margin
+            estimated_tokens = optimal_chunk_size // 4
+            st.caption(f"≈ {estimated_tokens:,} tokens per chunk")
+            st.caption(f"Using {safety_margin}% of {8192:,} token limit = {safe_output_tokens:,} tokens available")
     
     # Main area
     col1, col2 = st.columns(2)
@@ -651,8 +709,19 @@ def main():
                     # Show chunk information
                     st.info(f"📊 Document processed in {len(chunks)} chunks")
                     
-                    # Display full translation
-                    st.text_area("Full Translation", final_translation, height=600)
+                    # Display options
+                    display_mode = st.radio(
+                        "Display mode:",
+                        ["Formatted (preserves layout)", "Plain text"],
+                        horizontal=True
+                    )
+                    
+                    if display_mode == "Formatted (preserves layout)":
+                        # Use code block to preserve spacing and formatting
+                        st.code(final_translation, language=None)
+                    else:
+                        # Regular text area
+                        st.text_area("Full Translation", final_translation, height=600)
                     
                     # If there were issues, show them
                     if failed_chunks:
